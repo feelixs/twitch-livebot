@@ -562,10 +562,6 @@ async def server_background(s):
         except:
             stats = []
         for i in range(len(stats)):  # for followed user online status
-            if s.name == "hssa's server" and ulist[i] == "luside":
-                with open(f"copytime_{INSTANCE_NUMBER}.txt", "w") as f:
-                    f.write(str(time.time() - oldt))
-                oldt = time.time()
             time_since_last_msg = None
             try:
                 time_since_last_msg = round(time.time() - s.followed[i][4])
