@@ -22,21 +22,19 @@ Clone the repo by either downloading & extracting the .zip or opening it in GitH
 5) In 'cache.py', edit the 'name' and 'desc' variables to your bot's username and discriminator (the number next to its username)
 6) Now you can invite the new bot to your server. Go to   OAuth > Url Generator   on the developer portal and check off the 'bot' item. Then make sure to choose to choose the  following items before using the url to invite the bot:
 
-    - Manage Roles
-    - Change Nickname
-    - Send Messages
-    - Embed Links
-    - Mention Everyone
-    - (Instead of the above ones, you can just choose 'Administrator')
-    - applications.commands (in the same menu as where you chose 'bot')
+    - bot
+    - Administrator
+    - applications.commands
+   
 
 **- PYTHON SETUP**
 
-1) Download Python version >=v3.6 (I recommend Python v3.7 for this bot)
+1) Download Python 3.7 - you'll need this specific version because later versions may not work with the specific version of the discord slash module this bot uses
 2) Run the following commands in your python directory:
-    - pip install -U discord.py
-    - pip install requests asyncpg tqdm discord-py-slash-command
+    - pip install discord.py==1.7.3
+    - pip install discord-py-slash-command==3.0.3
     - pip install googletrans==3.1.0a0
+    - pip install requests asyncpg tqdm
 3) Run the files 'commands.py' and 'main.py'. You can either use an IDE like Pycharm or run them directly from command line. Note that both of these files have to be running at the same time for the bot to be fully functional.
 4) Add the bot to your server AFTER commands.py is up and running.
 5) Once both files are up and running, you can send a command like '!dt follow' in your discord server to let the bot process joining your server.
