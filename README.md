@@ -66,9 +66,11 @@ A) Usually this is because 1- commands.py isn't running and/or 2- you haven't gi
 A) This bot uses Python async/await functionalities (required by the discord.py module) that even I don't fully understand. If you're getting random errors that are noticeably affecting your instance, I'd say just re-start both files (commands.py & main.py), usually this fixes whatever's wrong. You can force-stop Python files by pressing cntrl+C or your IDE's stop button.
 
 
-**Q) How many servers can the bot join?**
+**Q) How many users can be followed?
 
-A) I don't know the limit, but note that if your bot is in over 100 servers simultaneously your instance will need to be officially verified by Discord. 
+A) There's no hard limit. But once you start getting into the hundreds it will definitely impact performance and notification delays. If you want to follow that many twitch users, or have the bot in multiple servers that each follow a large amount, you may want to implement Sharding.
+
+In the case of this bot, sharding is already implemented. All you have to do is duplicate the "main.py" file and rename it something like "main2.py", and edit the TOTAL_SHARDS to be equal to the amount of shards you're using, as well as update the SHARD_ID to 0, 1, 2, etc
 
 ****
 
