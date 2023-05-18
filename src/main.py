@@ -15,24 +15,18 @@ from discord.ext.commands.errors import CommandNotFound
 from discord.errors import NotFound
 from googletrans import Translator
 
-translator = Translator()
+SHARD_ID = 0
+TOTAL_SHARDS = 1
 
-try:
-    guild_ids = CACHE.guild_ids
-except:
-    guild_ids = []
+translator = Translator()
 
 DISCORD_TOKEN = CACHE.DISCORD_TOKEN
 TWITCH_ID = CACHE.TWITCH_ID
 TWITCH_SECRET = CACHE.TWITCH_SECRET
-CACHE_HEADER = "DISCORD_TOKEN = \'" + DISCORD_TOKEN + "\'\nTWITCH_ID = \'" + TWITCH_ID + \
-               "\'\nTWITCH_SECRET = \'" + TWITCH_SECRET + "\'\nprefix = \'" + CACHE.prefix \
-               + "\'\nname = \'" + CACHE.name + "\'\ndesc = \'" + CACHE.desc + "\'\nguild_ids = " \
-               + str(guild_ids) + "\ndata = "
 
 intent = discord.Intents.default()
 intent.members = True
-CLIENT = commands.Bot(command_prefix=CACHE.prefix, intents=intent)
+CLIENT = commands.AutoShardedBot(command_prefix=CACHE.prefix, intents=intent, shard_ids=[SHARD_ID], shard_count=TOTAL_SHARDS)
 
 
 @CLIENT.event
@@ -195,9 +189,9 @@ class Cache:
     def __init__(self):
         self.data = CACHE.data
         self.server_objects = []
-        self.reload_objects(self.data, 0)
+        self.reload_objects(self.data)
 
-    def reload_objects(self, newdata, write=1):
+    def reload_objects(self, newdata):
         """Sets self.data to newdata, reloads server objects with newdata, and writes updated data to file"""
         newdata = ast.literal_eval(str(newdata))
         self.data = newdata
@@ -206,16 +200,6 @@ class Cache:
         # recreate server object list to match changed cache file -
         # iterate through cache file, each server in it is sent to self.Server constructor that
         # creates a new object with that server's attributes. The object is added to self.server_objects
-        if write == 1:
-            w = False
-            while not w:
-                try:
-                    with open("cache.py", "wb") as cfile:
-                        cfile.write((CACHE_HEADER + str(newdata)).encode('utf8'))
-                    w = True
-                except:
-                    print("error writing")
-                    print(traceback.format_exc())
 
     @staticmethod
     def get_obdated_obj_followed(serverid):
@@ -337,7 +321,8 @@ class Twitch:
             start = "&started_at="
         h = {'Client-ID': self.CLIENT_ID, 'client_secret': self.CLIENT_SECRET, 'Authorization': "Bearer " + self.oauth}
         a = requests.get(
-            url='https://api.twitch.tv/helix/clips?broadcaster_id=' + str(broadcaster_id) + '&first=' + str(limit) + start + str(started_at), headers=h)
+            url='https://api.twitch.tv/helix/clips?broadcaster_id=' + str(broadcaster_id) + '&first=' + str(
+                limit) + start + str(started_at), headers=h)
         return a.json()
 
     def get_game_name(self, game_id):
@@ -386,7 +371,9 @@ class Twitch:
         try:
             for u in a.json()['data']:
                 if str(u['display_name']).lower() == str(user_query).lower():
-                    res = requests.get('https://api.twitch.tv/helix/videos?user_id=' + u['id'] + "&sort=time", headers=h).json()
+                    res = requests.get('https://api.twitch.tv/helix/videos?user_id=' + u['id'] + "&sort=time",
+                                       headers=h).json()
+                    # print(res)
                     return res['data'][0]['url']
         except IndexError:
             raise Exception("novids")
@@ -478,34 +465,30 @@ class Discord:
         self.activity = activity
 
     def has_role(self, serverid, userid, roleid):
-        guild = self.client.get_guild(int(serverid))
-        user = guild.get_member(userid)
-        print(user)
+        user = self.get_member(serverid, userid)
         for r in user.roles:
-            print(r)
             if r.id == roleid:
                 return True
         return False
 
+    @staticmethod
+    def get_member(serverid, userid):
+        for m in CLIENT.get_guild(int(serverid)).members:
+            if int(m.id) == int(userid):
+                return m
+        return None
+
     async def give_role(self, serverid, userid, roleid):
         guild = self.client.get_guild(int(serverid))
-        user = guild.get_member(userid)
+        user = self.get_member(serverid, userid)
         role = guild.get_role(roleid)
-        try:
-            if user is None:
-                print(type(userid))
-            await user.add_roles(role)
-        except discord.errors.Forbidden:
-            pass
+        await user.add_roles(role)
 
     async def remove_role(self, serverid, userid, roleid):
         guild = self.client.get_guild(int(serverid))
-        user = guild.get_member(userid)
+        user = self.get_member(serverid, userid)
         role = guild.get_role(roleid)
-        try:
-            await user.remove_roles(role)
-        except discord.errors.Forbidden:
-            pass
+        await user.remove_roles(role)
 
     @staticmethod
     def get_msg_secs_active(msg):
@@ -535,6 +518,9 @@ async def on_ready():
         print("logged in as")
         print("username: " + str(CLIENT.user.name))
         print("client id: " + str(DISCORD_TOKEN))
+        print("total shards: " + str(CLIENT.shard_count))
+        print("Running as shard: " + str(SHARD_ID))
+        print("shard guilds: " + str(len(CLIENT.guilds)))
         print("----------")
     else:
         print("ALREADY STARTED")
@@ -577,8 +563,16 @@ async def server_background(s):
             live_user = ulist[i]
             old_stat = s.followed[i][1]
             if stats[i] == "True" and old_stat == "False":  # if new status = True and old status = False
+                send_bool = True
                 t_user = twitch.find_user(live_user)
                 dta = twitch.get_streams(live_user)
+                original_starttime = datetime.datetime.fromisoformat(t_user.started_at[:-1]).timestamp()
+                curr_time = datetime.datetime.utcnow().timestamp()
+                print(curr_time - original_starttime)
+                if curr_time - original_starttime > 1800:
+                    # theres a bug where sometimes live msgs will be repeated
+                    # if 30 mins have passed since the user was recorded going live by twitch, assume we've already sent a msg
+                    send_bool = False
                 try:
                     viewers = str(dta['viewer_count'])
                 except:
@@ -606,12 +600,16 @@ async def server_background(s):
                             post_ch = int(take_off_brackets(str(s.settings['post_channels'][ind][1])))
                         else:
                             post_ch = int(take_off_brackets(str(s.settings['post_channels'][0][1])))
-                        sent_msg = await client_send(CLIENT.get_channel(post_ch), message, 0)
+                        if send_bool:
+                            try:
+                                sent_msg = await client_send(CLIENT.get_channel(post_ch), message, 0)
+                            except:
+                                print("send msg:", traceback.format_exc())
+                            print(datetime.datetime.now(), s.name, s.id, ":\n", message, "\nsent_msg:", sent_msg)
                         try:
                             prev_times[i] = round(time.time())
                         except:
                             print(traceback.format_exc())
-                        print(datetime.datetime.now(), s.name, s.id, ":\n", message, "\n")
                     except Exception as e:
                         if str(s.settings['post_channels'][0][1]) == "":
                             print("\n", s.name, s.id, "- couldn't send live message (no channel set)")
@@ -697,17 +695,22 @@ async def server_background(s):
             d_usrs, t_usrs, rls = s.settings['d'], s.settings['t'], s.settings['r']
             livedata = twitch.check_live(t_usrs)
             for i in range(len(livedata)):
-                findex = ulist.index(t_usrs[i])
-                if livedata[i] == "True":
-                    if s.followed[findex][6] == 0:
-                        await dis.give_role(s.id, d_usrs[i], rls[0])
-                        s.followed[findex][6] = 1
-                else:
-                    if s.followed[findex][6] == 1:
-                        await dis.remove_role(s.id, d_usrs[i], rls[0])
-                        s.followed[findex][6] = 0
-        except ValueError:
-            pass
+                if t_usrs[i] in ulist:
+                    findex = ulist.index(t_usrs[i])
+                    if livedata[i] == "True":
+                        if s.followed[findex][6] == 0:
+                            try:
+                                await dis.give_role(s.id, d_usrs[i], rls[0])
+                            except:
+                                pass
+                            s.followed[findex][6] = 1  # this keeps track of if the role was added already
+                    else:
+                        if s.followed[findex][6] == 1:
+                            try:
+                                await dis.remove_role(s.id, d_usrs[i], rls[0])
+                            except:
+                                pass
+                            s.followed[findex][6] = 0
         except:
             print(s.id, s.name, "d_t connections:", traceback.format_exc())
 
@@ -720,13 +723,19 @@ async def server_background(s):
                 if stitle != "":
                     if user.title != stitle and s.followed[i][1] == "True" and str(user.title) != "None":  # title change alerts
                         post_ch = int(take_off_brackets(str(s.settings['post_channels'][0][1])))
-                        if "2" in str(s.muted):
-                            print("old title:" + stitle, "\nnew title:", user.title)
-                            tm = await client_send(CLIENT.get_channel(post_ch), str(s.followed[i][0]) + " " + translate("has changed their title to", s.lang) + " **" + str(user.title) + "**", 0)
-                            delete_queue.append([tm, time.time()])
+                        try:
+                            if "2" in str(s.muted):
+                                print("old title:" + stitle, "\nnew title:", user.title)
+                                tm = await client_send(CLIENT.get_channel(post_ch), str(s.followed[i][0]) + " " + translate("has changed their title to", s.lang) + " **" + str(user.title) + "**", 0)
+                                delete_queue.append([tm, time.time()])
+                        except:
+                            pass
                         if "3" in str(s.muted):
                             # make it so it edits title in original alert
-                            ms = await CLIENT.get_channel(int(take_off_brackets(str(s.settings['post_channels'][0][1])))).fetch_message(s.followed[i][2])
+                            try:
+                                ms = await CLIENT.get_channel(int(take_off_brackets(str(s.settings['post_channels'][0][1])))).fetch_message(s.followed[i][2])
+                            except:
+                                pass
                             live_user = s.followed[i][0]
                             title = user.title
                             game = twitch.get_game_name(user.game_id)
@@ -739,7 +748,10 @@ async def server_background(s):
                                 message = str(parse_live_msg(str(live_user), str(s.live_message), title, game, viewers, s.settings, mention_users=True, server=s))
                             else:
                                 message = str(parse_live_msg(str(live_user), str(s.live_message), title, game, viewers, s.settings, mention_users=False, server=s))
-                            await ms.edit(content=message)
+                            try:
+                                await ms.edit(content=message)
+                            except:
+                                pass
             except:
                 print(s.id, s.name, "titles:", traceback.format_exc())
 
@@ -753,24 +765,30 @@ async def server_background(s):
                         if "9" in str(s.muted):
                             old_game = twitch.get_game_name(sgame)
                             print("old game:" + old_game, "\nnew game:" + curr_game_name)
-                            tg = await client_send(CLIENT.get_channel(post_ch), str(s.followed[i][0]) + " " + translate("is now playing", s.lang) + " **" + curr_game_name + "**", 0)
-                            delete_queue.append([tg, time.time()])
-                        if "3" in str(s.muted):
-                            # make it so it edits title in original alert
-                            ms = await CLIENT.get_channel(int(take_off_brackets(str(s.settings['post_channels'][0][1])))).fetch_message(s.followed[i][2])
-                            live_user = s.followed[i][0]
-                            title = user.title
-                            game = twitch.get_game_name(user.game_id)
-                            dta = twitch.get_streams(live_user)
                             try:
-                                viewers = str(dta['viewer_count'])
+                                tg = await client_send(CLIENT.get_channel(post_ch), str(s.followed[i][0]) + " " + translate("is now playing", s.lang) + " **" + curr_game_name + "**", 0)
+                                delete_queue.append([tg, time.time()])
                             except:
-                                viewers = "0"
-                            if "7" in str(s.muted):
-                                message = str(parse_live_msg(str(live_user), str(s.live_message), title, game, viewers, s.settings, mention_users=True, server=s))
-                            else:
-                                message = str(parse_live_msg(str(live_user), str(s.live_message), title, game, viewers, s.settings, mention_users=False, server=s))
-                            await ms.edit(content=message)
+                                pass
+                        try:
+                            if "3" in str(s.muted):
+                                # make it so it edits title in original alert
+                                ms = await CLIENT.get_channel(int(take_off_brackets(str(s.settings['post_channels'][0][1])))).fetch_message(s.followed[i][2])
+                                live_user = s.followed[i][0]
+                                title = user.title
+                                game = twitch.get_game_name(user.game_id)
+                                dta = twitch.get_streams(live_user)
+                                try:
+                                    viewers = str(dta['viewer_count'])
+                                except:
+                                    viewers = "0"
+                                if "7" in str(s.muted):
+                                    message = str(parse_live_msg(str(live_user), str(s.live_message), title, game, viewers, s.settings, mention_users=True, server=s))
+                                else:
+                                    message = str(parse_live_msg(str(live_user), str(s.live_message), title, game, viewers, s.settings, mention_users=False, server=s))
+                                await ms.edit(content=message)
+                        except:
+                            pass
             except:
                 print(s.id, s.name, "games:", traceback.format_exc())
 
@@ -811,24 +829,32 @@ async def server_background(s):
 async def main():
     cache.reload_objects_nolive()
     try:
-        # make sure the twitch oauth key is still valid
-        user = twitch.find_user('esl_csgo')
+        user = twitch.find_user('hesmen')
         if user is None:
-            # if not, reset it
+            print("resetting twitch oauth")
             twitch.set_oauth()
         procs = []
         for s in cache.server_objects:
-            procs.append(asyncio.create_task(server_background(s)))
+            gg = CLIENT.get_guild(int(s.id))
+            if gg is not None:
+                s = cache.binary_search_object_by_id(gg.id)
+                procs.append(asyncio.create_task(server_background(s)))
+
         for p in procs:
             try:
                 await p
             except:
                 print(traceback.format_exc())
+
         global delete_queue
         for m in delete_queue:
             if time.time() - m[1] > 300:
                 delete_queue.remove(m)
-                await m[0].delete()
+                try:
+                    print("deleting", m[0].content)
+                    await m[0].delete()
+                except:
+                    pass
     except:
         print(traceback.format_exc())
 
