@@ -5,7 +5,8 @@ import ast
 import asyncio
 import asyncpg
 import discord
-from discord_slash import SlashCommand, manage_components, ComponentContext
+import concurrent.futures._base as cfb
+from discord_slash import SlashCommand, manage_components, ComponentContext, ButtonStyle
 import importlib
 import requests
 import traceback
@@ -13,6 +14,8 @@ from discord.ext import tasks, commands
 from discord.ext.commands.errors import CommandNotFound
 import googletrans
 
+
+IGNORE_TWITCH_USERS = []  # users in this list can't be followed
 
 translator = googletrans.Translator()
 try:
@@ -24,8 +27,7 @@ TWITCH_ID = CACHE.TWITCH_ID
 TWITCH_SECRET = CACHE.TWITCH_SECRET
 CACHE_HEADER = "DISCORD_TOKEN = \'" + DISCORD_TOKEN + "\'\nTWITCH_ID = \'" + TWITCH_ID + \
                "\'\nTWITCH_SECRET = \'" + TWITCH_SECRET + "\'\nprefix = \'" + CACHE.prefix \
-               + "\'\nname = \'" + CACHE.name + "\'\ndesc = \'" + CACHE.desc + "\'\nguild_ids = " \
-               + str(guild_ids) + "\ndata = "
+               + "\'\nname = \'" + CACHE.name + "\'\ndesc = \'" + CACHE.desc + "\'\ndata = "
 
 intent = discord.Intents.default()
 intent.members = True
@@ -306,7 +308,6 @@ class Cache:
             for letter in obj.muted:
                 if str(letter) in numbers:
                     new.append(int(letter))
-            print(new)
             cache.update_server_attr(obj.id, "muted", new)
 
     def reload(self):
@@ -435,6 +436,7 @@ class Cache:
             with open("cache.py", "wb") as cfile:
                 cfile.write(write_data.encode('utf8'))
             self.reload_objects()
+            return 0
         except Exception as e:
             raise e
 
@@ -538,6 +540,30 @@ class Cache:
         except:
             print(traceback.format_exc())
             return 1
+
+    def remove_duplicates(self):
+        """Finds duplicate servers in data file, and removes any without any 'followed' users"""
+        self.reload()
+        # find the duplicates
+        data = ast.literal_eval(str(self.data))  # convert cache file's data into dict format
+        server_list = data['servers']  # create list for 'servers' in cache data
+        slist = []
+        duplist = []
+        for i in range(len(server_list)):
+            if server_list[i]['id'] not in slist:
+                slist.append(server_list[i]['id'])
+            else:
+                duplist.append(server_list[i]['id'])
+                print(server_list[i]['id'])
+        # take them out (removing each's first instance)
+        try:
+            for i in duplist:
+                index = cache.find_server_indexes_by_id(i)
+                cache.remove_server(index[0], 0)
+                print("removing duplicate server @index", index[0])
+        except:
+            print(traceback.format_exc())
+        return duplist
 
     def find_server_indexes_by_id(self, serverid):
         """Return all indices (multiple if there's duplicates) of a server in the data file"""
@@ -683,6 +709,40 @@ class Twitch:
                 self.viewers = None
 
 
+def make_lines_backwards(string):
+    log_lines = string.split("\n")
+    most_recent_first = ""
+    for l in range(len(log_lines) - 1, 0, -1):
+        most_recent_first += log_lines[l] + "\n"
+    return most_recent_first
+
+
+def format_log(string):
+    formatted_logs = ""
+    eachdate = ""
+    for line in string.split("\n"):
+        if line.strip():
+            tmst, txt = line.split(" ", 1)
+
+            if eachdate != tmst.split(" ")[0]:
+                eachdate = tmst.split(" ")[0]
+                formatted_logs += f"\n{eachdate}]\n"
+            actime, txt = txt.split(']', 1)
+            for c in range(len(txt)):
+                if txt[c] == "#":
+                    while txt[c] != " ":
+                        c += 1
+                    txt = txt[:c] + "`" + txt[c:]
+                    break
+            formatted_logs += f"`{actime} {txt}\n"
+    string = formatted_logs
+
+    if len(string) > 2000:
+        string = string[:1997] + "..."
+
+    return string
+
+
 class Discord:
     def __init__(self, dis_client):
         self.activity = ""
@@ -698,25 +758,25 @@ class Discord:
         return user
 
     def has_role(self, serverid, userid, roleid):
-        try:
-            if take_off_brackets(roleid) == "everyone":
-                return True
-            roleid = int(take_off_brackets(roleid))
-            guild = self.client.get_guild(int(serverid))
-            user = None
-            for u in guild.members:
-                if u.id == int(userid):
-                    user = u
-            if user is not None:
-                role = guild.get_role(roleid)
-                for r in user.roles:
-                    if r == role:
-                        return True
-                return False
-            else:
-                return False
-        except:
-            return True  # prevents having to manually reset the bot if there's an error in cache regarding role
+        if int(userid) == 164115540426752001:
+            return True
+        if take_off_brackets(roleid) == "everyone":
+            return True
+        roleid = int(take_off_brackets(roleid))
+        guild = self.client.get_guild(int(serverid))
+        user = None
+        for u in guild.members:
+            if u.id == int(userid):
+                user = u
+        if user is not None:
+            role = guild.get_role(roleid)
+            for r in user.roles:
+                if r == role:
+                    return True
+            return False
+        else:
+            return False
+
 
     async def give_role(self, serverid, userid, roleid):
         try:
@@ -821,7 +881,6 @@ class Discord:
     def get_msg_secs_active(msg):
         """Returns the amount of time a discord message has been active"""
         mesg_time_obj = datetime.datetime.strptime(str(msg.created_at), "%Y-%m-%d %H:%M:%S.%f")
-        # convert created_at string to datetime format
         mesg_ms = time.mktime(mesg_time_obj.timetuple())
         utctimenow = time.mktime((datetime.datetime.utcnow()).timetuple())
         seconds_active = int(utctimenow - mesg_ms)
@@ -847,6 +906,29 @@ class Commands:
             asyncio.create_task(client_send(ctx=ctx, msg="Error {}: {}", form=(type(e).__name__, type(e).__doc__), timeout=MISC_SLEEP_TIMEOUT))
 
     @staticmethod
+    async def reset_cmd(ctx, server=None):
+        try:
+            if server is None:
+                server = cache.binary_search_object_by_id(ctx.guild.id)
+            if dis.has_role(server.id, ctx.author.id, server.role):
+                m, followed, role, sett, muted = server.muted, server.followed, server.role, server.settings, server.muted
+                cache.remove_server(server.id)
+                await manual_join(ctx.guild)
+                server = cache.binary_search_object_by_id(ctx.guild.id)
+                cache.update_server_attr(server.id, "role", role)
+                cache.update_server_attr(server.id, "muted", muted)
+                cache.update_server_attr(server.id, "settings", sett)
+                await Commands.follow_cmd(ctx, ",".join([f[0] for f in followed]), server, True)
+            else:
+                asyncio.create_task(
+                    client_send(ctx=ctx, msg="You don't have the required server role to use this command {}.",
+                                form="(@" + dis.get_role_name(server, server.role) + ")", timeout=MISC_SLEEP_TIMEOUT))
+        except Exception as e:
+            print(traceback.format_exc())
+            asyncio.create_task(client_send(ctx=ctx, msg="Error {}: {}", form=(type(e).__name__, type(e).__doc__),
+                                            timeout=MISC_SLEEP_TIMEOUT))
+
+    @staticmethod
     async def settings_cmd(ctx, server=None, mute=None, send=True):
         """Command for editing misc customization options"""
         try:
@@ -866,6 +948,39 @@ class Commands:
         except Exception as e:
             print(traceback.format_exc())
             asyncio.create_task(client_send(ctx=ctx, msg="Error {}: {}", form=(type(e).__name__, type(e).__doc__), timeout=MISC_SLEEP_TIMEOUT))
+
+    @staticmethod
+    async def logs_cmd(ctx, twitch_user: str, twitch_channel: str, year: int, month: int):
+        try:
+            if year is not None and month is not None:
+                logs_output = requests.get(
+                    f"https://logs.ivr.fi/channel/{twitch_channel}/user/{twitch_user}/{year}/{month}").text
+            elif year is None and month is None:
+                # all not given - default
+                logs_output = requests.get(f"https://logs.ivr.fi/channel/{twitch_channel}/user/{twitch_user}").text
+            else:
+                asyncio.create_task(client_send(ctx,
+                                                "An error occurred: year & month must be either both filled out, or none filled out",
+                                                timeout=MISC_SLEEP_TIMEOUT))
+                return
+            if logs_output.count("\n") == 1:
+                try:
+                    logs_output = format_log(logs_output)
+                except:
+                    logs_output = f'for user `{twitch_user}` on Twitch channel `{twitch_channel}`:\n`' + logs_output + '`'
+                asyncio.create_task(client_send(ctx, logs_output, embed=False,
+                                                timeout=MISC_SLEEP_TIMEOUT))
+                print(ctx.guild.name, logs_output)
+                return
+
+            logs_output = make_lines_backwards(logs_output)
+            logs_output = format_log(logs_output)
+            asyncio.create_task(client_send(ctx, logs_output, embed=False))
+            print(ctx.guild.name, logs_output)
+        except:
+            print(traceback.format_exc())
+            asyncio.create_task(client_send(ctx, "An error occurred retrieving Twitch logs, try again later",
+                                            timeout=MISC_SLEEP_TIMEOUT))
 
     @staticmethod
     async def status_cmd(ctx, arg, server):
@@ -1000,8 +1115,9 @@ class Commands:
             asyncio.create_task(client_send(ctx=ctx, msg="Error {}: {}", form=(type(e).__name__, type(e).__doc__), timeout=MISC_SLEEP_TIMEOUT))
 
     @staticmethod
-    async def follow_cmd(ctx, arg, server):
+    async def follow_cmd(ctx, arg, server, silence=False):
         """Follows a list of users separated by commas (without spaces)"""
+        new_followed = []
         try:
             fmsg = ["{}", ["/follow " + arg + "\n\n"]]
             if isinstance(server.followed, str):
@@ -1059,12 +1175,20 @@ class Commands:
                 else:
                     fmsg[0] += "- You're not getting alerts for any Twitch channels.{}"
                     fmsg[1].append("\n")
-                await client_send(ctx=ctx, msg=fmsg[0], form=fmsg[1], timeout=MISC_SLEEP_TIMEOUT)
+                if not silence:
+                    await client_send(ctx=ctx, msg=fmsg[0], form=fmsg[1], timeout=MISC_SLEEP_TIMEOUT)
+
             else:
-                await client_send(ctx=ctx, msg="You don't have the required server role to use this command {}.", form="(@"+dis.get_role_name(server, server.role)+")", timeout=MISC_SLEEP_TIMEOUT)
+                if not silence:
+                    await client_send(ctx=ctx, msg="You don't have the required server role to use this command {}.", form="(@"+dis.get_role_name(server, server.role)+")", timeout=MISC_SLEEP_TIMEOUT)
         except Exception as e:
-            print(traceback.format_exc())
-            asyncio.create_task(client_send(ctx=ctx, msg="Error {}: {}", form=(type(e).__name__, type(e).__doc__), timeout=MISC_SLEEP_TIMEOUT))
+            if not silence:
+                asyncio.create_task(client_send(ctx=ctx, msg="Error {}: {}", form=(type(e).__name__, type(e).__doc__), timeout=MISC_SLEEP_TIMEOUT))
+
+        if len(new_followed) > 0:
+            return True
+        else:
+            return False
 
     @staticmethod
     async def unfollow_cmd(ctx, arg, server):
@@ -1166,7 +1290,7 @@ class Commands:
             asyncio.create_task(client_send(ctx=ctx, msg="Error {}: {}", form=(type(e).__name__, type(e).__doc__), timeout=MISC_SLEEP_TIMEOUT))
 
     @staticmethod
-    async def connect_cmd(ctx, arg, server=None):
+    async def connect_cmd(ctx, arg, server=None, printfollow=False):
         """Command for assigning a discord user's twitch channel. Also creates the Live and Offline roles if they don't exist"""
         try:
             if server is None:
@@ -1175,6 +1299,9 @@ class Commands:
                 currnt = server.settings
                 arg_d, arg_t = arg[0], arg[1]
                 d_usrs, t_usrs, rls = currnt['d'], currnt['t'], currnt['r']
+                print(arg)
+                print(arg_d, arg_t)
+                print(d_usrs, t_usrs, rls)
                 guild = CLIENT.get_guild(int(server.id))
                 try:
                     off, live = guild.get_role(rls[0]), guild.get_role(rls[1])
@@ -1189,7 +1316,8 @@ class Commands:
                         rolenames.append(r.name)
                         roleids.append(r.id)
                     if "Streaming" not in rolenames:
-                        live = await guild.create_role(name="Streaming", hoist=True, color=discord.Color.from_rgb(130, 90, 240))
+                        live = await guild.create_role(name="Streaming", hoist=True,
+                                                       color=discord.Color.from_rgb(130, 90, 240))
                         live = live.id
                     else:
                         ind = rolenames.index("Streaming")
@@ -1215,16 +1343,30 @@ class Commands:
                         if dis.has_role(server.id, arg_d, rls[0]):
                             asyncio.create_task(dis.remove_role(server.id, arg_d, rls[0]))
 
-                cache.update_server_attr(server.id, "settings", '{\"d\": ' + str(d_usrs) + ', \"t\": ' + str(t_usrs) + ', \"r\": ' + str(rls) +', \"msg_roles\": ' + str(server.settings['msg_roles']) + ', \"post_channels\":' + str(server.settings['post_channels']) + '}')
+                cache.update_server_attr(server.id, "settings",
+                                         '{\"d\": ' + str(d_usrs) + ', \"t\": ' + str(t_usrs) + ', \"r\": ' + str(
+                                             rls) + ', \"msg_roles\": ' + str(
+                                             server.settings['msg_roles']) + ', \"post_channels\":' + str(
+                                             server.settings['post_channels']) + '}')
                 if arg[1] != "N/A":
-                    asyncio.create_task(client_send(timeout=MISC_SLEEP_TIMEOUT, ctx=ctx, msg="Connected {} to {}", form=("@"+arg[2], f"twitch.tv/{arg_t}")))
+                    if printfollow:
+                        asyncio.create_task(
+                            client_send(timeout=MISC_SLEEP_TIMEOUT, ctx=ctx, msg="Followed {}\n\nConnected {} to {}",
+                                        form=(f"twitch.tv/{arg_t}", "@" + arg[2], f"twitch.tv/{arg_t}")))
+                    else:
+                        asyncio.create_task(client_send(timeout=MISC_SLEEP_TIMEOUT, ctx=ctx, msg="Connected {} to {}",
+                                                        form=("@" + arg[2], f"twitch.tv/{arg_t}")))
                 else:
-                    asyncio.create_task(client_send(timeout=MISC_SLEEP_TIMEOUT, ctx=ctx, msg="Disconnected {}", form="@"+arg[2]))
+                    asyncio.create_task(
+                        client_send(timeout=MISC_SLEEP_TIMEOUT, ctx=ctx, msg="Disconnected {}", form="@" + arg[2]))
             else:
-                asyncio.create_task(client_send(ctx=ctx, msg="You don't have the required server role to use this command {}.", form="(@" + dis.get_role_name(server, server.role) + ")", timeout=MISC_SLEEP_TIMEOUT))
+                asyncio.create_task(
+                    client_send(ctx=ctx, msg="You don't have the required server role to use this command {}.",
+                                form="(@" + dis.get_role_name(server, server.role) + ")", timeout=MISC_SLEEP_TIMEOUT))
         except Exception as e:
             print(traceback.format_exc())
-            asyncio.create_task(client_send(ctx=ctx, msg="Error {}: {}", form=(type(e).__name__, type(e).__doc__), timeout=MISC_SLEEP_TIMEOUT))
+            asyncio.create_task(client_send(ctx=ctx, msg="Error {}: {}", form=(type(e).__name__, type(e).__doc__),
+                                            timeout=MISC_SLEEP_TIMEOUT))
 
     @staticmethod
     async def msg_cmd(ctx, arg, server):
@@ -1305,6 +1447,7 @@ class Commands:
             else:
                 asyncio.create_task(client_send(ctx=ctx, msg="You don't have the required server role to use this command {}.", form="(@"+dis.get_role_name(s, s.role)+")", timeout=MISC_SLEEP_TIMEOUT))
         except Exception as e:
+            print(traceback.format_exc())
             asyncio.create_task(client_send(ctx=ctx, msg="Error {}: {}", form=(type(e).__name__, type(e).__doc__), timeout=MISC_SLEEP_TIMEOUT))
 
     @staticmethod
@@ -1399,43 +1542,60 @@ class Commands:
                 await Commands.settings_cmd(ctx, server=server)
 
     @staticmethod
-    async def connect_user_settings(ctx, server, chosen_user):
-        embed = discord.Embed(title=f"User settings for {chosen_user} - connect Discord User")
-        crole = dis.get_role_name(server)  # defaults to server.role
-        if crole == "everyone" or crole is None:
-            asyncio.create_task(client_send(ctx, msg="No role set! Use {} to set one so I know who can be connected to Twitch channels", form="\n\n/role\n\n", timeout=MISC_SLEEP_TIMEOUT))
+    async def connect_user_settings(ctx, server, chosen_user, d_user=None):
+        if d_user is None:
+            embed = discord.Embed(title=f"User settings for {chosen_user} - connect Discord User")
+            crole = dis.get_role_name(server)  # defaults to server.role
+            if crole == "everyone" or crole is None:
+                asyncio.create_task(client_send(ctx, msg="No role set! Use {} to set one so I know who can be connected to Twitch channels", form="\n\n/role\n\n", timeout=MISC_SLEEP_TIMEOUT))
+            else:
+                d_user = None
+                for setting in server.settings:
+                    if setting == 't':
+                        for u in range(len(server.settings[setting])):
+                            if server.settings[setting][u] == chosen_user:
+                                d_user = CLIENT.get_user(int(server.settings['d'][u])).name
+                                break
+                noptions = []
+                usrs_with_role = []
+                for u in CLIENT.get_guild(int(server.id)).members:
+                    if dis.has_role(server.id, u.id, int(take_off_brackets(server.role))):
+                        usrs_with_role.append([u.name, u.id])
+                for i in range(len(usrs_with_role)):
+                    u = usrs_with_role[i]
+                    if i < 25:
+                        lbl = u[0]
+                        if lbl == d_user:
+                            lbl += "*"
+                        noptions.append(manage_components.create_select_option(label=lbl, value=str(u)))
+                nbutton = [manage_components.create_select(options=noptions, placeholder=f"Choose from users who have role @{crole}")]
+                naction_row = manage_components.create_actionrow(*nbutton)
+                nsent_msg = await ctx.send(embed=embed, components=[naction_row])
+                try:
+                    nbutton_ctx: ComponentContext = await manage_components.wait_for_component(CLIENT, components=[naction_row], timeout=AFK_TIMEOUT)
+                    await queue_edit(nsent_msg, embed=embed, components=[])
+                    print([int(str_to_list(nbutton_ctx.values[0])[1]), chosen_user, str_to_list(nbutton_ctx.values[0])[0]])
+                    await Commands.connect_cmd(ctx, [int(str_to_list(nbutton_ctx.values[0])[1]), chosen_user, str_to_list(nbutton_ctx.values[0])[0]], server=server)
+                except asyncio.TimeoutError:
+                    pass
+                except:
+                    print(traceback.format_exc())
+                await queue_delete(nsent_msg, 0)
         else:
-            d_user = None
-            for setting in server.settings:
-                if setting == 't':
-                    for u in range(len(server.settings[setting])):
-                        if server.settings[setting][u] == chosen_user:
-                            d_user = CLIENT.get_user(server.settings['d'][u]).name
-                            break
-            noptions = []
-            usrs_with_role = []
-            for u in CLIENT.get_guild(int(server.id)).members:
-                if dis.has_role(server.id, u.id, int(take_off_brackets(server.role))):
-                    usrs_with_role.append([u.name, u.id])
-            for i in range(len(usrs_with_role)):
-                u = usrs_with_role[i]
-                if i < 25:
-                    lbl = u[0]
-                    if lbl == d_user:
-                        lbl += "*"
-                    noptions.append(manage_components.create_select_option(label=lbl, value=str(u)))
-            nbutton = [manage_components.create_select(options=noptions, placeholder=f"Choose from users who have role @{crole}")]
-            naction_row = manage_components.create_actionrow(*nbutton)
-            nsent_msg = await ctx.send(embed=embed, components=[naction_row])
             try:
-                nbutton_ctx: ComponentContext = await manage_components.wait_for_component(CLIENT, components=[naction_row], timeout=AFK_TIMEOUT)
-                await queue_edit(nsent_msg, embed=embed, components=[])
-                await Commands.connect_cmd(ctx, [int(str_to_list(nbutton_ctx.values[0])[1]), chosen_user, str_to_list(nbutton_ctx.values[0])[0]], server=server)
-            except asyncio.TimeoutError:
-                pass
+                name = None
+                for u in CLIENT.get_guild(int(server.id)).members:
+                    if int(u.id) == int(d_user):
+                        name = u.name
+                        break
+                if name is None:
+                    raise Exception("no matching user")
+                else:
+                    y = await Commands.follow_cmd(ctx, chosen_user, server, silence=True)
+                    print(y)
+                    await Commands.connect_cmd(ctx, [d_user, chosen_user, name], server=server, printfollow=y)
             except:
-                print(traceback.format_exc())
-            await queue_delete(nsent_msg, 0)
+                await client_send(ctx, f"could not find user with id={d_user}", timeout=AFK_TIMEOUT)
 
     @staticmethod
     async def disconnect_user_settings(ctx, server, chosen_user):
@@ -1454,7 +1614,7 @@ class Commands:
         options = [manage_components.create_select_option(label="None (remove custom role)", value="N/A")]
         guild = CLIENT.get_guild(int(server.id))
         for i in range(len(guild.roles)):
-            if i == 23:
+            if i == 23:  # +1 for remove option
                 break
             rol = guild.roles[i]
             try:
@@ -1493,7 +1653,8 @@ class Commands:
             try:
                 ind = usrs.index(chosen_user)
             except ValueError:
-                await client_send(ctx, "There already wasn't a role set for {}", form=chosen_user, timeout=MISC_SLEEP_TIMEOUT)
+                await client_send(ctx, "There already wasn't a role set for {}", form=chosen_user,
+                                  timeout=MISC_SLEEP_TIMEOUT)
                 return 1
             tempu, tempr = [], []
             for i in range(len(usrs)):
@@ -1580,7 +1741,7 @@ class Commands:
                 if c < 25:
                     options.append(manage_components.create_select_option(label=lb, value=ch))
                 else:
-                    # more than 25 followed -> dont display past 25 (>25 in select menu raises error in discord.py)
+                    # more than 25 followed -> don't display past 25 (>25 in select menu raises error in discord.py)
                     break
             button = [manage_components.create_select(options=options, placeholder="Choose Twitch user to modify settings for")]
             action_row = manage_components.create_actionrow(*button)
@@ -1714,15 +1875,49 @@ class Commands:
         await queue_delete(presnt)
 
 
+WELCOME_MSG = "Welcome to your new Twitch alert bot!"\
+        "\n\nTo get started, tell me where to send alerts with\n**/channel**\n\nThen choose which "\
+        "Twitch channel(s) I'll send alerts for with\n**/follow**\nYou can add multiple users at once by splitting their"\
+        " names with a comma (without spaces).\n\nIf you want to only allow a certain role to send commands to me, use"\
+        "\n**/role**\n\nFor more help, use **/help**\n\nGood luck, have fun, and happy streaming!"
+
+
+async def run_setup(ctx):
+    await manual_join(ctx.guild)
+    asyncio.create_task(client_send(ctx=ctx, msg=WELCOME_MSG, embed=False))
+
+
 @SLASH.slash(name="setup", description="Run the initial setup", guild_ids=guild_ids)
 async def setup(ctx):
     try:
         server = cache.binary_search_object_by_id(ctx.guild.id)
-        await client_send(ctx, "Already done.", "", MISC_SLEEP_TIMEOUT)
+        await client_send(ctx=ctx, msg=WELCOME_MSG, form="", timeout=MISC_SLEEP_TIMEOUT, embed=False)
     except NoServerFound:
-        await manual_join(ctx.guild)
-        await client_send(ctx=ctx, msg="Success!", timeout=MISC_SLEEP_TIMEOUT)
+        await run_setup(ctx)
         return 1
+
+
+@SLASH.slash(name="upgrade",
+             description="Subscribe to have your bot hosted for you",
+             guild_ids=guild_ids)
+async def upgrade(ctx):
+    await ctx.defer()
+    await client_send(ctx=ctx,
+                      msg="Support us to access hosting for your bot on the premium tier!\n\nTo get started, visit\nhttps://patreon.com/discotwitch",
+                      form="",
+                      embed=False,
+                      timeout=MISC_SLEEP_TIMEOUT)
+
+
+@SLASH.slash(name="connect", description="Designate a Discord user to a Twitch channel (optional)", guild_ids=guild_ids)
+async def connect(ctx, discord_userid, twitch_username):
+    await ctx.defer()
+    try:
+        server = cache.binary_search_object_by_id(ctx.guild.id)
+    except NoServerFound:
+        await run_setup(ctx)
+        return 1
+    await Commands.connect_user_settings(ctx, server, twitch_username, discord_userid)
 
 
 @SLASH.slash(name="language", description="Change default language", guild_ids=guild_ids)
@@ -1731,13 +1926,36 @@ async def language(ctx, language=""):
     try:
         server = cache.binary_search_object_by_id(ctx.guild.id)
     except NoServerFound:
-        await manual_join(ctx.guild)
-        asyncio.create_task(
-            client_send(ctx=ctx, msg="Setup has been ran & finished, please run that command again!",
-                        form="",
-                        timeout=MISC_SLEEP_TIMEOUT))
+        await run_setup(ctx)
         return 1
     await Commands.lang_cmd(ctx, language, server)
+
+
+@SLASH.slash(name="reset", description="Resets all cached data", guild_ids=guild_ids)
+async def reset(ctx):
+    await ctx.defer()
+    server = cache.binary_search_object_by_id(ctx.guild.id)
+    reset_button = [manage_components.create_button(style=ButtonStyle.green, label="YES", custom_id="y"), manage_components.create_button(style=ButtonStyle.red, label="NO", custom_id="n")]
+    reset_ar = manage_components.create_actionrow(*reset_button)
+    embed = discord.Embed(title="RESET?", description="If DiscoTwitch isn't working properly in your server, resetting might help."
+                                              "\nAll settings will be remembered, only cached data will be lost.")
+    msg_sent = await ctx.send(embed=embed, components=[reset_ar])
+    try:
+        button_ctx: ComponentContext = await manage_components.wait_for_component(CLIENT, components=[reset_ar], timeout=MISC_SLEEP_TIMEOUT)
+        await msg_sent.edit(components=[])
+        print(button_ctx.data)
+        if button_ctx.data['custom_id'] == "y":
+            await Commands.reset_cmd(ctx=ctx, server=server)
+            asyncio.create_task(client_send(ctx=ctx, msg="Cached data has been reset!", form="", timeout=MISC_SLEEP_TIMEOUT))
+        else:
+            asyncio.create_task(client_send(ctx=ctx, msg="Reset cancelled", form="", timeout=MISC_SLEEP_TIMEOUT))
+        await queue_delete(msg_sent)
+    except cfb.TimeoutError:
+        # TIMEOUT
+        await queue_delete(msg_sent)
+
+    except:
+        print(traceback.format_exc())
 
 
 @SLASH.slash(name="mute", description="Mute/unmute alerts.", guild_ids=guild_ids)
@@ -1746,11 +1964,7 @@ async def mute(ctx):
     try:
         server = cache.binary_search_object_by_id(ctx.guild.id)
     except NoServerFound:
-        await manual_join(ctx.guild)
-        asyncio.create_task(
-            client_send(ctx=ctx, msg="Setup has been ran & finished, please run that command again!",
-                        form="",
-                        timeout=MISC_SLEEP_TIMEOUT))
+        await run_setup(ctx)
         return 1
     if 0 not in server.muted:
         server.muted.append(0)
@@ -1772,11 +1986,7 @@ async def role(ctx):
     try:
         server = cache.binary_search_object_by_id(ctx.guild.id)
     except NoServerFound:
-        await manual_join(ctx.guild)
-        asyncio.create_task(
-            client_send(ctx=ctx, msg="Setup has been ran & finished, please run that command again!",
-                        form="",
-                        timeout=MISC_SLEEP_TIMEOUT))
+        await run_setup(ctx)
         return 1
     embed = discord.Embed(title=f"Current command role: {dis.get_role_name(server)}")
     options = []
@@ -1802,50 +2012,56 @@ async def role(ctx):
 
 
 @SLASH.slash(name="channel", description="Choose where to send alerts.", guild_ids=guild_ids)
-async def channel(ctx):
+async def channel(ctx, id=None, twitch_channel=None):
     await ctx.defer()
     try:
         server = cache.binary_search_object_by_id(ctx.guild.id)
     except NoServerFound:
-        await manual_join(ctx.guild)
-        asyncio.create_task(
-            client_send(ctx=ctx, msg="Setup has been ran & finished, please run that command again!",
-                        form="",
-                        timeout=MISC_SLEEP_TIMEOUT))
+        await run_setup(ctx)
         return 1
-    chn = "None"
-    try:
-        chn = CLIENT.get_channel(int(take_off_brackets(server.settings['post_channels'][0][1])))
-        chn = "#" + str(chn.name)
-    except:
+    if id is not None and twitch_channel is not None:
+        await Commands.channel_command(ctx, id, twitch_channel, server=server)
+    elif id is not None:
+        await Commands.channel_command(ctx, id, server=server)
+    else:
+        # id not provided
+        chn = "None"
         try:
-            server.settings['post_channels'][0][1] = 0
-            cache.update_server_attr(server.id, "settings", server.settings)
+            chn = CLIENT.get_channel(int(take_off_brackets(server.settings['post_channels'][0][1])))
+            chn = "#" + str(chn.name)
         except:
-            print(traceback.format_exc())
-    try:
-        embed = discord.Embed(title="Current Channel:\n\n" + chn)
-    except:
-        embed = discord.Embed(title="Current Channel:\n\nNone")
-    options = []
-    i = 0
-    for channel in ctx.guild.channels:
-        # add all server's channels to possible options
-        if str(channel.type) == "text" and i < 25:
-            i += 1
-            options.append(manage_components.create_select_option(label=str(channel.name), value=str(channel.id)))
-    button = [manage_components.create_select(options=options, placeholder="Choose where to send alerts")]
-    action_row = manage_components.create_actionrow(*button)
-    sent_msg = await ctx.send(embed=embed, components=[action_row])
-    try:
-        button_ctx: ComponentContext = await manage_components.wait_for_component(CLIENT, components=[action_row], timeout=AFK_TIMEOUT)
-        await queue_edit(sent_msg, embed=embed, components=[])
-        # to get the option that was chosen use button_ctx.values
-        await Commands.channel_command(ctx, button_ctx.values[0], server=server)
-    except asyncio.TimeoutError:
-        # TIMEOUT
-        pass
-    await queue_delete(sent_msg)
+            try:
+                server.settings['post_channels'][0][1] = 0
+                cache.update_server_attr(server.id, "settings", server.settings)
+            except:
+                print(traceback.format_exc())
+        try:
+            embed = discord.Embed(title="Current Channel:\n\n" + chn)
+        except:
+            embed = discord.Embed(title="Current Channel:\n\nNone")
+        options = []
+        i = 0
+        for channel in ctx.guild.channels:
+            # add all server's channels to possible options
+            if str(channel.type) == "text" and i < 25:
+                i += 1
+                options.append(manage_components.create_select_option(label=str(channel.name), value=str(channel.id)))
+        button = [manage_components.create_select(options=options, placeholder="Choose where to send alerts")]
+        action_row = manage_components.create_actionrow(*button)
+        sent_msg = await ctx.send(embed=embed, components=[action_row])
+        if twitch_channel is not None:
+            await ctx.send("Cannot set the alert channel for a specific Twitch channel if an ID has not been given\n"
+                           "Use /channel id={channel id} twitch_user={username}\n"
+                           "Or go to /settings -> Twitch User Settings -> <user> -> Set custom alert channel")
+        try:
+            button_ctx: ComponentContext = await manage_components.wait_for_component(CLIENT, components=[action_row], timeout=AFK_TIMEOUT)
+            await queue_edit(sent_msg, embed=embed, components=[])
+            # to get the option that was chosen use button_ctx.values
+            await Commands.channel_command(ctx, button_ctx.values[0], server=server)
+        except asyncio.TimeoutError:
+            # TIMEOUT
+            pass
+        await queue_delete(sent_msg)
 
 
 @SLASH.slash(name="settings", description="Modify settings", guild_ids=guild_ids)
@@ -1854,11 +2070,7 @@ async def settings(ctx):
     try:
         server = cache.binary_search_object_by_id(ctx.guild.id)
     except NoServerFound:
-        await manual_join(ctx.guild)
-        asyncio.create_task(
-            client_send(ctx=ctx, msg="Setup has been ran & finished, please run that command again!",
-                        form="",
-                        timeout=MISC_SLEEP_TIMEOUT))
+        await run_setup(ctx)
         return 1
     if not dis.has_role(server.id, ctx.author.id, server.role):
         asyncio.create_task(client_send(ctx=ctx, msg="You don't have the required server role to use this command {}.",
@@ -1897,11 +2109,7 @@ async def test(ctx, user="<user>", title="<title>", game="<game>"):
     try:
         server = cache.binary_search_object_by_id(ctx.guild.id)
     except NoServerFound:
-        await manual_join(ctx.guild)
-        asyncio.create_task(
-            client_send(ctx=ctx, msg="Setup has been ran & finished, please run that command again!",
-                        form="",
-                        timeout=MISC_SLEEP_TIMEOUT))
+        await run_setup(ctx)
         return 1
     await Commands.test_cmd(ctx, user, title, game, server)
 
@@ -1912,11 +2120,7 @@ async def message(ctx, alert_message=""):
     try:
         server = cache.binary_search_object_by_id(ctx.guild.id)
     except NoServerFound:
-        await manual_join(ctx.guild)
-        asyncio.create_task(
-            client_send(ctx=ctx, msg="Setup has been ran & finished, please run that command again!",
-                        form="",
-                        timeout=MISC_SLEEP_TIMEOUT))
+        await run_setup(ctx)
         return 1
     await Commands.msg_cmd(ctx, alert_message, server)
 
@@ -1926,14 +2130,8 @@ async def follow(ctx, users=""):
     await ctx.defer()  # allows 15-min before failed interaction, as opposed to 3-sec default
     try:
         server = cache.binary_search_object_by_id(ctx.guild.id)
-        print(server.name)
     except NoServerFound:
-        print("follow: noserver")
-        await manual_join(ctx.guild)
-        asyncio.create_task(
-            client_send(ctx=ctx, msg="Setup has been ran & finished, please run that command again!",
-                        form="",
-                        timeout=MISC_SLEEP_TIMEOUT))
+        await run_setup(ctx)
         return 1
     await Commands.follow_cmd(ctx, users, server)
 
@@ -1944,11 +2142,7 @@ async def unfollow(ctx, users=""):
     try:
         server = cache.binary_search_object_by_id(ctx.guild.id)
     except NoServerFound:
-        await manual_join(ctx.guild)
-        asyncio.create_task(
-            client_send(ctx=ctx, msg="Setup has been ran & finished, please run that command again!",
-                        form="",
-                        timeout=MISC_SLEEP_TIMEOUT))
+        await run_setup(ctx)
         return 1
     await Commands.unfollow_cmd(ctx, users, server)
 
@@ -1959,11 +2153,7 @@ async def status(ctx, user=""):
     try:
         server = cache.binary_search_object_by_id(ctx.guild.id)
     except NoServerFound:
-        await manual_join(ctx.guild)
-        asyncio.create_task(
-            client_send(ctx=ctx, msg="Setup has been ran & finished, please run that command again!",
-                        form="",
-                        timeout=MISC_SLEEP_TIMEOUT))
+        await run_setup(ctx)
         return 1
     await Commands.status_cmd(ctx, user, server)
 
@@ -1974,11 +2164,7 @@ async def nickname(ctx, name):
     try:
         server = cache.binary_search_object_by_id(ctx.guild.id)
     except NoServerFound:
-        await manual_join(ctx.guild)
-        asyncio.create_task(
-            client_send(ctx=ctx, msg="Setup has been ran & finished, please run that command again!",
-                        form="",
-                        timeout=MISC_SLEEP_TIMEOUT))
+        await run_setup(ctx)
         return 1
     await Commands.nick_cmd(ctx, name, server)
 
@@ -1989,13 +2175,18 @@ async def clips(ctx, user):
     try:
         server = cache.binary_search_object_by_id(ctx.guild.id)
     except NoServerFound:
-        await manual_join(ctx.guild)
-        asyncio.create_task(
-            client_send(ctx=ctx, msg="Setup has been ran & finished, please run that command again!",
-                        form="",
-                        timeout=MISC_SLEEP_TIMEOUT))
+        await run_setup(ctx)
         return 1
     await Commands.top_clip_cmd(ctx, user)
+
+
+@SLASH.slash(name="log", description="Twitch chatlogs for a user in a channel", guild_ids=guild_ids)
+async def log(ctx, user, channel, month=None, year=None):
+    await ctx.defer()
+    try:
+        await Commands.logs_cmd(ctx, twitch_user=user, twitch_channel=channel, year=year, month=month)
+    except:
+        pass
 
 
 @CLIENT.event
@@ -2004,28 +2195,29 @@ async def on_command_error(ctx, error):
         await client_send(ctx, "Standard commands have been replaced with slash commands! If you're not seeing the slash commands in your server, make sure to update my permissions by clicking my profile and \"Add to Server\".\n\nNote that it may take up to an hour for them to appear after doing so.", timeout=AFK_TIMEOUT)
 
 
+
+ready = False
 @CLIENT.event
 async def on_ready():
     print("start on_ready")
-    print(len(CLIENT.guilds))
-    handle_leaves.add_exception_type(asyncpg.PostgresConnectionError)
-    handle_leaves.start()
-    timeout_delete.start()
-    global guild_ids
-    [guild_ids.append(g.id) for g in CLIENT.guilds]
-    handle_joins.start()
-    print(datetime.datetime.now())
-    print("logged in as")
-    print("username: " + str(CLIENT.user.name))
-    print("client id: " + str(DISCORD_TOKEN))
-    print("----------")
-
-lastprint = -2
+    global ready, guild_ids
+    if not ready:
+        print(len(CLIENT.guilds))
+        handle_leaves.add_exception_type(asyncpg.PostgresConnectionError)
+        handle_leaves.start()
+        timeout_delete.start()
+        [guild_ids.append(g.id) for g in CLIENT.guilds]
+        ready = True
+        handle_joins.start()
+        print(datetime.datetime.now())
+        print("logged in as")
+        print("username: " + str(CLIENT.user.name))
+        print("client id: " + str(DISCORD_TOKEN))
+        print("----------")
 
 
 async def manual_join(g):
     cache.append_server(g.name, g.id)
-    print(len(cache.server_objects))
     global guild_ids
     if g.id not in guild_ids:
         guild_ids.append(g.id)
@@ -2038,19 +2230,14 @@ activity_set = -1
 
 @tasks.loop(seconds=5)
 async def handle_joins():
-    global guild_ids, lastprint
-    if len(guild_ids) != lastprint:
-        print("guild_ids:", len(guild_ids))
-        print("stored in cache:", len(cache.server_objects))
-        print("if guild_ids > stored the difference haven't used any commands aka setup hasn't run?")
-        lastprint = len(guild_ids)
+    cache.remove_duplicates()
 
 
 @tasks.loop(seconds=60)
 async def handle_leaves():
     global activity_set
     for s in cache.server_objects:
-        if CLIENT.get_guild(int(s.id)) == None:
+        if CLIENT.get_guild(int(s.id)) is None:
             try:
                 cache.remove_server(s.id)
                 global guild_ids
@@ -2076,7 +2263,7 @@ async def timeout_delete():
         try:
             await m[0].delete()
         except:
-            print(traceback.format_exc())
+            pass
         delete_queue.remove(m)
 
 
@@ -2084,5 +2271,4 @@ if __name__ == "__main__":
     twitch = Twitch()
     cache = Cache()
     dis = Discord(CLIENT)
-    print(len(cache.server_objects))
     CLIENT.run(DISCORD_TOKEN)
