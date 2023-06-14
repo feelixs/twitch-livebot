@@ -1,6 +1,6 @@
 This project is source code for a Discord bot that can track an unlimited amount of Twitch channels, and send notifications when they start streaming.
 
-It runs without the need for any separate database, and stores all settings in an integrated cache.py file inside a dict object. 
+It runs without the need for any separate database, and stores all settings in an integrated cache.py file
 
 It's optimized for small amounts of servers, and is easy to setup and use!
 
