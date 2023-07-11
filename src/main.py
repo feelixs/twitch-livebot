@@ -4,7 +4,6 @@ import time
 import ast
 import tqdm
 import asyncio
-import asyncpg
 import discord
 import importlib
 import requests
@@ -512,7 +511,6 @@ async def on_ready():
         started = 1
         print("start on_ready")
         cache.strtup_refresh_follows()
-        main.add_exception_type(asyncpg.PostgresConnectionError)
         main.start()
         print(datetime.datetime.now())
         print("logged in as")

@@ -3,7 +3,6 @@ import datetime
 import time
 import ast
 import asyncio
-import asyncpg
 import discord
 import concurrent.futures._base as cfb
 from discord_slash import SlashCommand, manage_components, ComponentContext, ButtonStyle
@@ -2203,7 +2202,6 @@ async def on_ready():
     global ready, guild_ids
     if not ready:
         print(len(CLIENT.guilds))
-        handle_leaves.add_exception_type(asyncpg.PostgresConnectionError)
         handle_leaves.start()
         timeout_delete.start()
         [guild_ids.append(g.id) for g in CLIENT.guilds]

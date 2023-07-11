@@ -34,7 +34,7 @@ Clone the repo by either downloading & extracting the .zip or opening it in GitH
     - pip install discord.py==1.7.3
     - pip install discord-py-slash-command==3.0.3
     - pip install googletrans==3.1.0a0
-    - pip install requests asyncpg tqdm
+    - pip install requests tqdm
 3) Run the files 'commands.py' and 'main.py'. You can either use an IDE like Pycharm or run them directly from command line. Note that both of these files have to be running at the same time for the bot to be fully functional.
 4) Add the bot to your server AFTER commands.py is up and running.
 5) Once both files are up and running, you can send a command like '!dt follow' in your discord server to let the bot process joining your server.
