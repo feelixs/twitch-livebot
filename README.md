@@ -1,6 +1,6 @@
 This project is source code for a Discord bot that can track an unlimited amount of Twitch channels, and send notifications when they start streaming.
 
-It runs without the need for any separate database, and stores all settings in an integrated cache.py file inside a dict object. 
+It runs without the need for any separate database, and stores all settings in an integrated cache.py file
 
 It's optimized for small amounts of servers, and is easy to setup and use!
 
@@ -34,7 +34,7 @@ Clone the repo by either downloading & extracting the .zip or opening it in GitH
     - pip install discord.py==1.7.3
     - pip install discord-py-slash-command==3.0.3
     - pip install googletrans==3.1.0a0
-    - pip install requests asyncpg tqdm
+    - pip install requests tqdm
 3) Run the files 'commands.py' and 'main.py'. You can either use an IDE like Pycharm or run them directly from command line. Note that both of these files have to be running at the same time for the bot to be fully functional.
 4) Add the bot to your server AFTER commands.py is up and running.
 5) Once both files are up and running, you can send a command like '!dt follow' in your discord server to let the bot process joining your server.
@@ -63,10 +63,11 @@ A) Usually this is because 1- commands.py isn't running and/or 2- you haven't gi
 
 A) This bot uses Python async/await functionalities (required by the discord.py module) that even I don't fully understand. If you're getting random errors that are noticeably affecting your instance, I'd say just re-start both files (commands.py & main.py), usually this fixes whatever's wrong. You can force-stop Python files by pressing cntrl+C or your IDE's stop button.
 
+**Q) How many users can be followed?**
 
-**Q) How many servers can the bot join?**
+A) There's no hard limit. But once you start getting into the hundreds it will definitely impact performance and notification delays. If you want to follow that many twitch users, or have the bot in multiple servers that each follow a large amount, you may want to implement Sharding.
 
-A) I don't know the limit, but note that if your bot is in over 100 servers simultaneously your instance will need to be officially verified by Discord. 
+In the case of this bot, sharding is already implemented. All you have to do is duplicate the "main.py" file and rename it something like "main2.py", and edit the TOTAL_SHARDS to be equal to the amount of shards you're using, as well as update the SHARD_ID to 0, 1, 2, etc
 
 ****
 
